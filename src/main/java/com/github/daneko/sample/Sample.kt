@@ -1,14 +1,17 @@
 package com.github.daneko.sample
 
+import arrow.Kind
 import arrow.core.left
 import arrow.core.right
 import arrow.data.EitherT
-import arrow.effects.ForIO
-import arrow.effects.IO
+import arrow.effects.DeferredK
+import arrow.effects.ForDeferredK
+import arrow.effects.deferredk.async.async
 import arrow.effects.fix
-import arrow.effects.handleErrorWith
-import arrow.effects.instances.io.monad.monad
+import arrow.effects.typeclasses.Async
+import arrow.effects.unsafeRunAsync
 import arrow.instances.eithert.monad.binding
+import arrow.typeclasses.MonadThrow
 
 data class Hoge(val i: Int)
 data class Fuga(val i: Int)
@@ -30,31 +33,36 @@ fun <A> realworld(f: () -> A): A = Math.random().let {
     }
 }
 
-interface Sample {
+interface Logic<F> : MonadThrow<F> {
+    fun getHoge(i: Int): Kind<F, Hoge> = this.catch { realworld { Hoge(i) } }
 
-    fun getHoge(i: Int): IO<Hoge> = IO { realworld { Hoge(i) } }
+    fun getFuga(i: Int): Kind<F, Fuga> = this.catch { realworld { Fuga(i) } }
+}
 
-    fun getFuga(i: Int): IO<Fuga> = IO { realworld { Fuga(i) } }
+interface Sample<F> : Async<F> {
 
-    fun getResult(a: Int, b: Int): EitherT<ForIO, MyError, Result> {
+    val logic: Logic<F>
 
-        return binding(IO.monad()) {
+    fun getResult(a: Int, b: Int): EitherT<F, MyError, Result> {
 
-            val hoge = EitherT(getHoge(a)
+        return binding(this) {
+
+            val hoge = EitherT(logic.getHoge(a)
                 .map { it.right() }
                 .handleErrorWith {
                     when (it) {
-                        is HandleException -> IO.just(MyError.HogeError(it).left())
-                        else -> IO.raiseError(it)
+                        is HandleException -> this@Sample.just(MyError.HogeError(it).left())
+                        else -> raiseError(it)
                     }
-                }).bind()
+                })
+                .bind()
 
-            val fuga = EitherT(getFuga(a)
+            val fuga = EitherT(logic.getFuga(a)
                 .map { it.right() }
                 .handleErrorWith {
                     when (it) {
-                        is HandleException -> IO.just(MyError.FugaError(it).left())
-                        else -> IO.raiseError(it)
+                        is HandleException -> this@Sample.just(MyError.FugaError(it).left())
+                        else -> raiseError(it)
                     }
                 }).bind()
 
@@ -64,7 +72,15 @@ interface Sample {
 }
 
 fun main(args: Array<String>) {
-    val sample = object : Sample {}
+    val instance = DeferredK.async()
+
+    @Suppress("DELEGATED_MEMBER_HIDES_SUPERTYPE_OVERRIDE")
+    val logic = object : Logic<ForDeferredK>, MonadThrow<ForDeferredK> by instance {}
+
+    @Suppress("DELEGATED_MEMBER_HIDES_SUPERTYPE_OVERRIDE")
+    val sample = object : Sample<ForDeferredK>, Async<ForDeferredK> by instance {
+        override val logic: Logic<ForDeferredK> = logic
+    }
 
     for (it in 1..10) {
         sample.getResult(it, it * 2).value().fix().unsafeRunAsync {
